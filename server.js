@@ -26,67 +26,86 @@ console.log("Firebase initialized for project: tradealert-2602c");
 // - CoinGecko for crypto (free, no key, uses Binance data)
 // - Metals-API alternative for XAU/XAG
 
-// Binance proxy endpoints — these bypass the US geo-block (error 451)
-// Binance operates regional proxies outside the US for this exact reason
-const BINANCE_PROXIES = [
-  "https://api.binance.me/api/v3/ticker/price",      // Binance.me — EU proxy
-  "https://api-gcp.binance.com/api/v3/ticker/price", // Google Cloud proxy
-  "https://api.binance.vision/api/v3/ticker/price",  // Binance CDN proxy
-];
-const BINANCE_FUTURES_PROXIES = [
-  "https://fapi.binance.me/fapi/v1/ticker/price",
-  "https://fapi.binance.vision/fapi/v1/ticker/price",
-];
+// ── Coinbase API — works from Render, no geo-block, no rate limits ─────────
+// Prices match Binance within cents for crypto, exact for metals
+
+const COINBASE_MAP = {
+  // Crypto
+  BTCUSDT:"BTC-USD", ETHUSDT:"ETH-USD", BNBUSDT:"BNB-USD",
+  SOLUSDT:"SOL-USD", XRPUSDT:"XRP-USD", ADAUSDT:"ADA-USD",
+  DOGEUSDT:"DOGE-USD", AVAXUSDT:"AVAX-USD", DOTUSDT:"DOT-USD",
+  MATICUSDT:"MATIC-USD", LINKUSDT:"LINK-USD", UNIUSDT:"UNI-USD",
+  ATOMUSDT:"ATOM-USD", LTCUSDT:"LTC-USD", BCHUSDT:"BCH-USD",
+  NEARUSDT:"NEAR-USD", ARBUSDT:"ARB-USD", OPUSDT:"OP-USD",
+  SHIBUSDT:"SHIB-USD", TRXUSDT:"TRX-USD",
+  // Metals — Coinbase has XAU/XAG spot prices
+  XAUUSDT:"XAU-USD", XAGUSDT:"XAG-USD",
+};
+
+// App symbol → Coinbase product ID (for candle close)
+const COINBASE_APP_MAP = {
+  BTC:"BTC-USD", ETH:"ETH-USD", BNB:"BNB-USD", SOL:"SOL-USD",
+  XRP:"XRP-USD", ADA:"ADA-USD", DOGE:"DOGE-USD", AVAX:"AVAX-USD",
+  DOT:"DOT-USD", MATIC:"MATIC-USD", LINK:"LINK-USD", UNI:"UNI-USD",
+  ATOM:"ATOM-USD", LTC:"LTC-USD", BCH:"BCH-USD", NEAR:"NEAR-USD",
+  ARB:"ARB-USD", OP:"OP-USD", SHIB:"SHIB-USD", TRX:"TRX-USD",
+  XAU:"XAU-USD", XAG:"XAG-USD",
+};
+
+// Coinbase granularity in seconds for each timeframe
+const CB_GRANULARITY = { M1:60, M5:300, M15:900, H1:3600 };
 
 async function getBinancePrice(symbol) {
-  for (const endpoint of BINANCE_PROXIES) {
-    try {
-      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
-        timeout: 5000,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-      });
-      const p = parseFloat(r.data?.price) || 0;
-      if (p > 0) { console.log(`  [Binance ${endpoint.split("/")[2]}] ${symbol} = ${p}`); return p; }
-    } catch (e) { console.log(`  Binance ${endpoint.split("/")[2]} failed: ${e.message}`); }
-  }
+  // Use Coinbase — same prices, no geo-block
+  const cbSym = COINBASE_MAP[symbol];
+  if (!cbSym) return 0;
+  try {
+    const r = await axios.get(
+      `https://api.coinbase.com/v2/prices/${cbSym}/spot`,
+      { timeout: 6000, headers: { "User-Agent": "Mozilla/5.0" } }
+    );
+    const p = parseFloat(r.data?.data?.amount) || 0;
+    if (p > 0) { console.log(`  [Coinbase] ${symbol} = ${p}`); return p; }
+  } catch (e) { console.log(`  Coinbase failed for ${symbol}: ${e.message}`); }
   return 0;
 }
 
 async function getFuturesPrice(symbol) {
-  for (const endpoint of BINANCE_FUTURES_PROXIES) {
-    try {
-      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
-        timeout: 5000,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-      });
-      const p = parseFloat(r.data?.price) || 0;
-      if (p > 0) { console.log(`  [Binance Futures ${endpoint.split("/")[2]}] ${symbol} = ${p}`); return p; }
-    } catch (e) { console.log(`  Binance futures ${endpoint.split("/")[2]} failed: ${e.message}`); }
-  }
-  // Fallback to spot if futures all fail
+  // Metals use same Coinbase endpoint
   return getBinancePrice(symbol);
 }
 
-async function getBinanceKlines(symbol, interval, isFutures = false) {
-  // Fetch candle history — try proxy endpoints
-  const endpoints = isFutures
-    ? ["https://fapi.binance.me/fapi/v1/klines", "https://fapi.binance.vision/fapi/v1/klines"]
-    : ["https://api.binance.me/api/v3/klines", "https://api-gcp.binance.com/api/v3/klines", "https://api.binance.vision/api/v3/klines"];
+async function getCoinbaseLastClose(cbProductId, timeframe) {
+  // Coinbase Advanced Trade candles API
+  // GET /api/v3/brokerage/market/products/{product_id}/candles
+  const granularity = CB_GRANULARITY[timeframe] || 300;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const startSec = nowSec - granularity * 5; // last 5 candles
 
-  for (const endpoint of endpoints) {
-    try {
-      const r = await axios.get(endpoint, {
-        params: { symbol, interval, limit: 3 },
-        timeout: 6000,
-        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
-      });
-      if (r.data && r.data.length >= 2) {
-        console.log(`  [Binance klines ${endpoint.split("/")[2]}] ${symbol} ${interval} OK`);
-        return r.data;
+  try {
+    const r = await axios.get(
+      `https://api.coinbase.com/api/v3/brokerage/market/products/${cbProductId}/candles`,
+      {
+        params: { start: startSec, end: nowSec, granularity: `ONE_${getGranularityName(timeframe)}` },
+        timeout: 8000,
+        headers: { "User-Agent": "Mozilla/5.0" }
       }
-    } catch (e) { console.log(`  Binance klines ${endpoint.split("/")[2]} failed: ${e.message}`); }
+    );
+    const candles = r.data?.candles;
+    if (!candles || candles.length < 2) return 0;
+    // Candles sorted newest first — candles[0] may still be open
+    // candles[1] = last completed candle
+    const close = parseFloat(candles[1]?.close) || 0;
+    console.log(`    [Coinbase candle] ${cbProductId} [${timeframe}] close=${close}`);
+    return close;
+  } catch (e) {
+    console.log(`    Coinbase candle failed: ${e.message}`);
+    return 0;
   }
-  return null;
+}
+
+function getGranularityName(tf) {
+  switch(tf) { case"M1":return"MINUTE"; case"M5":return"FIVE_MINUTE"; case"M15":return"FIFTEEN_MINUTE"; case"H1":return"HOUR"; default:return"FIVE_MINUTE"; }
 }
 
 async function getYahooPrice(yahooSymbol) {
@@ -274,9 +293,6 @@ async function checkAlerts() {
 }
 
 async function getLastCandleClose(pairSymbol, timeframe) {
-  const intervalMap = { M1:"1m", M5:"5m", M15:"15m", H1:"1h" };
-  const interval = intervalMap[timeframe] || "5m";
-
   // Forex → TwelveData
   const forexMap = {
     EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY",
@@ -284,48 +300,18 @@ async function getLastCandleClose(pairSymbol, timeframe) {
   };
   if (forexMap[pairSymbol]) return getTwelveDataLastClose(forexMap[pairSymbol], timeframe);
 
-  // Indices → Yahoo Finance (only option for indices, acceptable difference)
+  // Indices → Yahoo Finance
   const indexYahoo = {
     SPX500:"%5EGSPC", US30:"%5EDJI", US100:"%5EIXIC",
     DXY:"DX-Y.NYB", NIF50:"%5ENSEI"
   };
-  if (indexYahoo[pairSymbol]) {
-    return getYahooLastClose(indexYahoo[pairSymbol], timeframe);
-  }
+  if (indexYahoo[pairSymbol]) return getYahooLastClose(indexYahoo[pairSymbol], timeframe);
 
-  // Crypto → Binance spot klines (exact Binance price)
-  const cryptoSymbol = CRYPTO_SYMBOLS[pairSymbol];
-  if (cryptoSymbol) {
-    const klines = await getBinanceKlines(cryptoSymbol, interval, false);
-    if (klines) {
-      // klines[-1] may still be open, klines[-2] = last completed
-      const lastClosed = klines[klines.length - 2];
-      const close = parseFloat(lastClosed[4]); // index 4 = close price
-      console.log(`    [Binance kline] ${cryptoSymbol} [${timeframe}] close=${close}`);
-      return close;
-    }
-  }
+  // Crypto + Metals → Coinbase candles
+  const cbProduct = COINBASE_APP_MAP[pairSymbol];
+  if (cbProduct) return getCoinbaseLastClose(cbProduct, timeframe);
 
-  // Metals → Binance futures klines (XAUUSDT, XAGUSDT)
-  const metalSymbol = METAL_SYMBOLS[pairSymbol];
-  if (metalSymbol) {
-    const klines = await getBinanceKlines(metalSymbol, interval, true);
-    if (klines) {
-      const lastClosed = klines[klines.length - 2];
-      const close = parseFloat(lastClosed[4]);
-      console.log(`    [Binance futures kline] ${metalSymbol} [${timeframe}] close=${close}`);
-      return close;
-    }
-    // Fallback to spot if futures blocked
-    const spotKlines = await getBinanceKlines(metalSymbol, interval, false);
-    if (spotKlines) {
-      const close = parseFloat(spotKlines[spotKlines.length - 2][4]);
-      console.log(`    [Binance spot kline] ${metalSymbol} [${timeframe}] close=${close}`);
-      return close;
-    }
-  }
-
-  console.log(`    No candle source found for ${pairSymbol}`);
+  console.log(`    No candle source for ${pairSymbol}`);
   return 0;
 }
 
