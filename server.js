@@ -275,9 +275,22 @@ app.get("/check", async (req, res) => {
   }
 });
 
-// Health check for Render
-app.get("/", (req, res) => {
-  res.json({ status: "TradeAlert server running", time: new Date().toISOString() });
+// Log every incoming request
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} from ${req.ip}`);
+  next();
+});
+
+// Health check — also runs alert check so ANY ping triggers it
+// This way even if cron-job.org hits "/" instead of "/check" it still works
+app.get("/", async (req, res) => {
+  console.log(`Root ping — running check...`);
+  try {
+    await checkAlerts();
+    res.json({ status: "ok", time: new Date().toISOString() });
+  } catch (err) {
+    res.json({ status: "error", error: err.message });
+  }
 });
 
 // Manual test endpoint — call this to send a test FCM push
