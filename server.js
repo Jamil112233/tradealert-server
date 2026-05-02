@@ -11,9 +11,13 @@ const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
+  projectId: "tradealert-2602c",
 });
 
 const db = admin.firestore();
+const messaging = admin.messaging();
+
+console.log("Firebase initialized for project: tradealert-2602c");
 
 // ── Price fetchers ────────────────────────────────────────────────────────
 
@@ -102,27 +106,28 @@ async function sendAlarmPush(fcmToken, alert, currentPrice) {
   const message = {
     token: fcmToken,
     data: {
-      // data-only message so app can handle it even when killed
-      type:          "PRICE_ALERT",
-      alertId:       alert.id,
-      pairSymbol:    alert.pairSymbol,
-      pairName:      alert.pairName,
-      pairEmoji:     alert.pairEmoji || "",
-      targetPrice:   String(alert.targetPrice),
-      currentPrice:  String(currentPrice),
-      direction:     alert.direction,
-      hitType:       hitType,
-      isAlarm:       String(alert.alarm !== false),
-      isSoundEnabled:String(alert.soundEnabled !== false),
-      isVibration:   String(alert.vibrationEnabled !== false),
+      type:           "PRICE_ALERT",
+      alertId:        String(alert.id),
+      pairSymbol:     String(alert.pairSymbol || ""),
+      pairName:       String(alert.pairName || ""),
+      pairEmoji:      String(alert.pairEmoji || ""),
+      targetPrice:    String(alert.targetPrice),
+      currentPrice:   String(currentPrice),
+      direction:      String(alert.direction || ""),
+      hitType:        hitType,
+      isAlarm:        String(alert.alarm !== false),
+      isSoundEnabled: String(alert.soundEnabled !== false),
+      isVibration:    String(alert.vibrationEnabled !== false),
     },
     android: {
-      priority: "high",   // wakes device even in Doze mode
+      priority: "high",
     },
   };
 
-  await admin.messaging().send(message);
-  console.log(`✅ FCM sent: ${alert.pairSymbol} → ${currentPrice}`);
+  console.log(`📤 Sending FCM to token: ${fcmToken.substring(0, 20)}...`);
+  const response = await messaging.send(message);
+  console.log(`✅ FCM sent successfully: ${response}`);
+  return response;
 }
 
 // ── Main check logic ──────────────────────────────────────────────────────
@@ -205,6 +210,57 @@ app.get("/check", async (req, res) => {
 // Health check for Render
 app.get("/", (req, res) => {
   res.json({ status: "TradeAlert server running", time: new Date().toISOString() });
+});
+
+// Manual test endpoint — call this to send a test FCM push
+// Usage: https://your-render-url.onrender.com/test?token=YOUR_FCM_TOKEN
+app.get("/test", async (req, res) => {
+  const token = req.query.token;
+  if (!token) {
+    // Auto-find first user token from Firestore
+    try {
+      const users = await db.collection("users").limit(1).get();
+      if (users.empty) return res.json({ error: "No users found in Firestore" });
+      const fcmToken = users.docs[0].data().fcmToken;
+      const userId   = users.docs[0].id;
+      console.log(`Test: found user ${userId}, token: ${fcmToken.substring(0,20)}...`);
+      await messaging.send({
+        token: fcmToken,
+        data: {
+          type:         "PRICE_ALERT",
+          alertId:      "test-123",
+          pairSymbol:   "BTC",
+          pairName:     "Bitcoin",
+          pairEmoji:    "₿",
+          targetPrice:  "50000",
+          currentPrice: "50001",
+          direction:    "above",
+          hitType:      "Instant Hit",
+          isAlarm:      "true",
+          isSoundEnabled: "true",
+          isVibration:  "true",
+        },
+        android: { priority: "high" },
+      });
+      return res.json({ ok: true, message: "Test FCM sent!", userId, tokenPreview: fcmToken.substring(0,20) });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+});
+
+// Show current active alerts in Firestore
+app.get("/status", async (req, res) => {
+  try {
+    const alerts = await db.collection("alerts").where("triggered", "==", false).get();
+    const users  = await db.collection("users").get();
+    const data = [];
+    alerts.forEach(doc => data.push({ id: doc.id, ...doc.data() }));
+    const userCount = users.size;
+    res.json({ activeAlerts: data.length, userCount, alerts: data });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 const PORT = process.env.PORT || 3000;
