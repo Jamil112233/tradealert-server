@@ -21,42 +21,37 @@ console.log("Firebase initialized for project: tradealert-2602c");
 
 // ── Price fetchers ────────────────────────────────────────────────────────
 
+// Binance API endpoints — try multiple to avoid geo-blocking on Render
+const BINANCE_SPOT_ENDPOINTS = [
+  "https://api.binance.com/api/v3/ticker/price",
+  "https://api1.binance.com/api/v3/ticker/price",
+  "https://api2.binance.com/api/v3/ticker/price",
+  "https://api3.binance.com/api/v3/ticker/price",
+  "https://api4.binance.com/api/v3/ticker/price",
+];
+
 async function getBinancePrice(symbol) {
-  try {
-    const r = await axios.get(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-      { timeout: 5000, headers: { "User-Agent": "Mozilla/5.0" } }
-    );
-    return parseFloat(r.data.price) || 0;
-  } catch (e) {
-    console.log(`  Binance spot failed for ${symbol}: ${e.message}`);
-    return 0;
+  for (const endpoint of BINANCE_SPOT_ENDPOINTS) {
+    try {
+      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
+        timeout: 5000,
+        headers: { "User-Agent": "Mozilla/5.0" }
+      });
+      const p = parseFloat(r.data.price);
+      if (p > 0) {
+        console.log(`  [Binance ${endpoint.includes("api.b") ? "api" : endpoint.split("//")[1].split(".")[0]}] ${symbol} = ${p}`);
+        return p;
+      }
+    } catch (e) {
+      console.log(`  Binance ${endpoint} failed: ${e.message}`);
+    }
   }
+  return 0;
 }
 
 async function getFuturesPrice(symbol) {
-  // Binance futures blocked on Render free tier — use spot instead
-  // XAU/XAG spot prices are same as futures for our purposes
-  try {
-    const r = await axios.get(
-      `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-      { timeout: 5000, headers: { "User-Agent": "Mozilla/5.0" } }
-    );
-    const p = parseFloat(r.data.price);
-    if (p > 0) return p;
-  } catch (e) {}
-
-  // Fallback: Yahoo Finance gold/silver futures
-  try {
-    const yahooMap = { XAUUSDT: "GC%3DF", XAGUSDT: "SI%3DF" };
-    const ySymbol = yahooMap[symbol];
-    if (!ySymbol) return 0;
-    const r = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=1m&range=1d`,
-      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0" } }
-    );
-    return parseFloat(r.data.chart.result[0].meta.regularMarketPrice) || 0;
-  } catch (e) { return 0; }
+  // Use Binance SPOT for metals — same price, no geo-block issues
+  return getBinancePrice(symbol);
 }
 
 async function getYahooPrice(yahooSymbol) {
