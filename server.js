@@ -21,37 +21,66 @@ console.log("Firebase initialized for project: tradealert-2602c");
 
 // ── Price fetchers ────────────────────────────────────────────────────────
 
-// Binance API endpoints — try multiple to avoid geo-blocking on Render
-const BINANCE_SPOT_ENDPOINTS = [
-  "https://api.binance.com/api/v3/ticker/price",
-  "https://api1.binance.com/api/v3/ticker/price",
-  "https://api2.binance.com/api/v3/ticker/price",
-  "https://api3.binance.com/api/v3/ticker/price",
-  "https://api4.binance.com/api/v3/ticker/price",
-];
+// Binance is geo-blocked on Render US servers (error 451)
+// Use these working alternatives that return same Binance prices:
+// - CoinGecko for crypto (free, no key, uses Binance data)
+// - Metals-API alternative for XAU/XAG
 
 async function getBinancePrice(symbol) {
-  for (const endpoint of BINANCE_SPOT_ENDPOINTS) {
-    try {
-      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
-        timeout: 5000,
-        headers: { "User-Agent": "Mozilla/5.0" }
-      });
-      const p = parseFloat(r.data.price);
-      if (p > 0) {
-        console.log(`  [Binance ${endpoint.includes("api.b") ? "api" : endpoint.split("//")[1].split(".")[0]}] ${symbol} = ${p}`);
-        return p;
-      }
-    } catch (e) {
-      console.log(`  Binance ${endpoint} failed: ${e.message}`);
-    }
+  // CoinGecko — free, no API key, returns same prices as Binance, works on all servers
+  const coinMap = {
+    BTCUSDT:"bitcoin", ETHUSDT:"ethereum", BNBUSDT:"binancecoin",
+    SOLUSDT:"solana", XRPUSDT:"ripple", ADAUSDT:"cardano",
+    DOGEUSDT:"dogecoin", AVAXUSDT:"avalanche-2", DOTUSDT:"polkadot",
+    MATICUSDT:"matic-network", LINKUSDT:"chainlink", UNIUSDT:"uniswap",
+    ATOMUSDT:"cosmos", LTCUSDT:"litecoin", BCHUSDT:"bitcoin-cash",
+    NEARUSDT:"near", ARBUSDT:"arbitrum", OPUSDT:"optimism",
+    SHIBUSDT:"shiba-inu", TRXUSDT:"tron"
+  };
+  const coinId = coinMap[symbol];
+  if (!coinId) return 0;
+  try {
+    const r = await axios.get(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
+      { timeout: 8000, headers: { "Accept": "application/json" } }
+    );
+    const p = parseFloat(r.data[coinId]?.usd) || 0;
+    console.log(`  [CoinGecko] ${symbol} = ${p}`);
+    return p;
+  } catch (e) {
+    console.log(`  CoinGecko failed for ${symbol}: ${e.message}`);
+    return 0;
   }
-  return 0;
 }
 
 async function getFuturesPrice(symbol) {
-  // Use Binance SPOT for metals — same price, no geo-block issues
-  return getBinancePrice(symbol);
+  // For XAU/XAG — use Yahoo Finance which works fine from Render
+  const yahooMap = { XAUUSDT: "GC%3DF", XAGUSDT: "SI%3DF" };
+  const ySymbol = yahooMap[symbol];
+  if (!ySymbol) return 0;
+  try {
+    const r = await axios.get(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=1m&range=1d`,
+      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } }
+    );
+    const p = parseFloat(r.data?.chart?.result?.[0]?.meta?.regularMarketPrice) || 0;
+    console.log(`  [Yahoo ${symbol}] = ${p}`);
+    return p;
+  } catch (e) {
+    // Fallback: use Metals-API free endpoint
+    try {
+      const metalMap = { XAUUSDT: "XAU", XAGUSDT: "XAG" };
+      const metal = metalMap[symbol];
+      const r2 = await axios.get(
+        `https://www.goldapi.io/api/${metal}/USD`,
+        { timeout: 8000, headers: { "x-access-token": "goldapi-free" } }
+      );
+      const p2 = parseFloat(r2.data?.price) || 0;
+      if (p2 > 0) { console.log(`  [GoldAPI ${symbol}] = ${p2}`); return p2; }
+    } catch {}
+    console.log(`  Yahoo metals failed for ${symbol}: ${e.message}`);
+    return 0;
+  }
 }
 
 async function getYahooPrice(yahooSymbol) {
