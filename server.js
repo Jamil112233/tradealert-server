@@ -22,72 +22,41 @@ console.log("Firebase initialized for project: tradealert-2602c");
 // ── Price fetchers ────────────────────────────────────────────────────────
 
 async function getBinancePrice(symbol) {
-  // Try Binance first, fallback to Coinbase/CoinGecko if blocked
   try {
     const r = await axios.get(
       `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-      { timeout: 5000 }
+      { timeout: 5000, headers: { "User-Agent": "Mozilla/5.0" } }
     );
-    const p = parseFloat(r.data.price);
-    if (p > 0) return p;
-  } catch (e) { console.log(`  Binance blocked, trying fallback for ${symbol}...`); }
-
-  // Fallback: CoinGecko (works everywhere, no API key)
-  try {
-    const coinMap = {
-      BTCUSDT: "bitcoin", ETHUSDT: "ethereum", BNBUSDT: "binancecoin",
-      SOLUSDT: "solana", XRPUSDT: "ripple", ADAUSDT: "cardano",
-      DOGEUSDT: "dogecoin", AVAXUSDT: "avalanche-2", DOTUSDT: "polkadot",
-      MATICUSDT: "matic-network", LINKUSDT: "chainlink", UNIUSDT: "uniswap",
-      ATOMUSDT: "cosmos", LTCUSDT: "litecoin", BCHUSDT: "bitcoin-cash",
-      NEARUSDT: "near", ARBUSDT: "arbitrum", OPUSDT: "optimism",
-      SHIBUSDT: "shiba-inu", TRXUSDT: "tron"
-    };
-    const coinId = coinMap[symbol];
-    if (!coinId) return 0;
-    const r = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
-      { timeout: 8000, headers: { "Accept": "application/json" } }
-    );
-    return parseFloat(r.data[coinId]?.usd) || 0;
-  } catch (e) { console.log(`  CoinGecko also failed: ${e.message}`); return 0; }
+    return parseFloat(r.data.price) || 0;
+  } catch (e) {
+    console.log(`  Binance spot failed for ${symbol}: ${e.message}`);
+    return 0;
+  }
 }
 
 async function getFuturesPrice(symbol) {
-  // For metals: XAUUSDT, XAGUSDT
-  // Binance futures may be blocked on Render — use alternative
-  try {
-    const r = await axios.get(
-      `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${symbol}`,
-      { timeout: 5000 }
-    );
-    const p = parseFloat(r.data.price);
-    if (p > 0) return p;
-  } catch (e) { console.log(`  Binance futures blocked, trying fallback for ${symbol}...`); }
-
-  // Fallback: use Binance spot for metals (close enough)
+  // Binance futures blocked on Render free tier — use spot instead
+  // XAU/XAG spot prices are same as futures for our purposes
   try {
     const r = await axios.get(
       `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`,
-      { timeout: 5000 }
+      { timeout: 5000, headers: { "User-Agent": "Mozilla/5.0" } }
     );
     const p = parseFloat(r.data.price);
     if (p > 0) return p;
   } catch (e) {}
 
-  // Last fallback: Metals-API alternative (free, no key needed for basic)
+  // Fallback: Yahoo Finance gold/silver futures
   try {
-    const metalMap = { XAUUSDT: "XAU", XAGUSDT: "XAG" };
-    const metal = metalMap[symbol];
-    if (!metal) return 0;
-    // Use Yahoo Finance for gold/silver
-    const yahooMap = { XAUUSDT: "GC%3DF", XAGUSDT: "SI%3DF" }; // Gold/Silver futures on Yahoo
+    const yahooMap = { XAUUSDT: "GC%3DF", XAGUSDT: "SI%3DF" };
+    const ySymbol = yahooMap[symbol];
+    if (!ySymbol) return 0;
     const r = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${yahooMap[symbol]}?interval=1m&range=1d`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=1m&range=1d`,
       { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0" } }
     );
     return parseFloat(r.data.chart.result[0].meta.regularMarketPrice) || 0;
-  } catch (e) { console.log(`  Metal fallback failed: ${e.message}`); return 0; }
+  } catch (e) { return 0; }
 }
 
 async function getYahooPrice(yahooSymbol) {
@@ -256,14 +225,28 @@ async function checkAlerts() {
         });
         console.log(`  ✅ Marked triggered in Firestore`);
 
-        const userDoc = await db.collection("users").doc(alert.userId).get();
-        if (!userDoc.exists) {
-          console.log(`  ❌ User not found: ${alert.userId}`);
-          continue;
+        // Get user FCM token - try by userId first, fallback to any user
+        let fcmToken = null;
+        try {
+          const userDoc = await db.collection("users").doc(alert.userId).get();
+          if (userDoc.exists) {
+            fcmToken = userDoc.data().fcmToken;
+            console.log(`  ✅ Found user by ID: ${alert.userId}`);
+          } else {
+            console.log(`  ⚠️ User not found by ID: ${alert.userId}, searching all users...`);
+            // Fallback: get first user (for single-device apps)
+            const allUsers = await db.collection("users").limit(1).get();
+            if (!allUsers.empty) {
+              fcmToken = allUsers.docs[0].data().fcmToken;
+              console.log(`  ✅ Found fallback user: ${allUsers.docs[0].id}`);
+            }
+          }
+        } catch (e) {
+          console.error(`  ❌ User lookup error: ${e.message}`);
         }
-        const fcmToken = userDoc.data().fcmToken;
+
         if (!fcmToken) {
-          console.log(`  ❌ No FCM token for user: ${alert.userId}`);
+          console.log(`  ❌ No FCM token found for alert ${alert.id}`);
           continue;
         }
         console.log(`  📤 Sending FCM push...`);
