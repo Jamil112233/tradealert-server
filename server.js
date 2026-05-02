@@ -209,97 +209,160 @@ async function sendAlarmPush(fcmToken, alert, currentPrice) {
 // ── Main check logic ──────────────────────────────────────────────────────
 
 async function checkAlerts() {
-  const now = new Date().toISOString();
-  console.log(`\n========== CHECK at ${now} ==========`);
+  const now = new Date();
+  const nowMs = now.getTime();
+  console.log(`\n========== CHECK at ${now.toISOString()} ==========`);
 
   let snapshot;
   try {
-    snapshot = await db.collection("alerts")
-      .where("triggered", "==", false)
-      .get();
-  } catch (err) {
-    console.error("Firestore read failed:", err.message);
-    return;
-  }
+    snapshot = await db.collection("alerts").where("triggered", "==", false).get();
+  } catch (err) { console.error("Firestore read failed:", err.message); return; }
 
-  if (snapshot.empty) {
-    console.log("No active alerts in Firestore.");
-    return;
-  }
-
+  if (snapshot.empty) { console.log("No active alerts in Firestore."); return; }
   console.log(`Found ${snapshot.size} active alert(s)`);
 
-  // Group by pairSymbol
-  const alertsByPair = {};
+  const instantAlerts = [];
+  const candleAlerts  = [];
   snapshot.forEach(doc => {
     const alert = { id: doc.id, ...doc.data() };
-    console.log(`  Alert: ${alert.pairSymbol} target=${alert.targetPrice} dir=${alert.direction}`);
-    if (!alertsByPair[alert.pairSymbol]) alertsByPair[alert.pairSymbol] = [];
-    alertsByPair[alert.pairSymbol].push(alert);
+    const type = alert.candleClose ? `candle_${alert.timeframe}` : "instant";
+    console.log(`  Alert: ${alert.pairSymbol} target=${alert.targetPrice} dir=${alert.direction} type=${type}`);
+    if (alert.candleClose) candleAlerts.push(alert);
+    else instantAlerts.push(alert);
   });
 
-  const promises = Object.entries(alertsByPair).map(async ([pair, alerts]) => {
+  // ── Instant alerts ─────────────────────────────────────────────────────
+  const instantByPair = {};
+  for (const a of instantAlerts) {
+    if (!instantByPair[a.pairSymbol]) instantByPair[a.pairSymbol] = [];
+    instantByPair[a.pairSymbol].push(a);
+  }
+  for (const [pair, alerts] of Object.entries(instantByPair)) {
     const price = await fetchPrice(pair);
-    console.log(`  Price check: ${pair} = ${price}`);
-    if (!price || price <= 0) {
-      console.log(`  ⚠️ Could not fetch price for ${pair}`);
-      return;
+    console.log(`  [Instant] ${pair} = ${price}`);
+    if (!price) { console.log(`  ⚠️ Could not fetch price for ${pair}`); continue; }
+    for (const alert of alerts) {
+      const hit = alert.direction === "above" ? price >= alert.targetPrice : price <= alert.targetPrice;
+      console.log(`    ${pair}: price=${price} target=${alert.targetPrice} hit=${hit}`);
+      if (hit) await triggerAlert(alert, price);
     }
+  }
+
+  // ── Candle close alerts ────────────────────────────────────────────────
+  // Group by pair+timeframe, only check within 90s of candle boundary
+  const candleGroups = {};
+  for (const a of candleAlerts) {
+    const key = `${a.pairSymbol}_${a.timeframe}`;
+    if (!candleGroups[key]) candleGroups[key] = [];
+    candleGroups[key].push(a);
+  }
+
+  for (const [key, alerts] of Object.entries(candleGroups)) {
+    const [pair, tf] = key.split("_");
+    const candleMs = getCandleMs(tf);
+    const lastBoundary = Math.floor(nowMs / candleMs) * candleMs;
+    const secondsAfter = (nowMs - lastBoundary) / 1000;
+    console.log(`  [Candle ${tf}] ${pair}: ${secondsAfter.toFixed(0)}s after boundary`);
+
+    if (secondsAfter > 90) {
+      console.log(`    ⏳ Not within 90s of candle close — skipping`);
+      continue;
+    }
+
+    const closePrice = await getLastCandleClose(pair, tf);
+    console.log(`    Last closed candle: ${closePrice}`);
+    if (!closePrice) continue;
 
     for (const alert of alerts) {
-      const hit = alert.direction === "above"
-        ? price >= alert.targetPrice
-        : price <= alert.targetPrice;
-
-      console.log(`  ${pair}: price=${price} target=${alert.targetPrice} dir=${alert.direction} hit=${hit}`);
-
-      if (!hit) continue;
-
-      console.log(`  🎯 HIT DETECTED: ${pair} price=${price} target=${alert.targetPrice}`);
-
-      try {
-        await db.collection("alerts").doc(alert.id).update({
-          triggered: true,
-          hitAt: Date.now(),
-          hitPrice: price,
-        });
-        console.log(`  ✅ Marked triggered in Firestore`);
-
-        // Get user FCM token - try by userId first, fallback to any user
-        let fcmToken = null;
-        try {
-          const userDoc = await db.collection("users").doc(alert.userId).get();
-          if (userDoc.exists) {
-            fcmToken = userDoc.data().fcmToken;
-            console.log(`  ✅ Found user by ID: ${alert.userId}`);
-          } else {
-            console.log(`  ⚠️ User not found by ID: ${alert.userId}, searching all users...`);
-            // Fallback: get first user (for single-device apps)
-            const allUsers = await db.collection("users").limit(1).get();
-            if (!allUsers.empty) {
-              fcmToken = allUsers.docs[0].data().fcmToken;
-              console.log(`  ✅ Found fallback user: ${allUsers.docs[0].id}`);
-            }
-          }
-        } catch (e) {
-          console.error(`  ❌ User lookup error: ${e.message}`);
-        }
-
-        if (!fcmToken) {
-          console.log(`  ❌ No FCM token found for alert ${alert.id}`);
-          continue;
-        }
-        console.log(`  📤 Sending FCM push...`);
-        await sendAlarmPush(fcmToken, alert, price);
-      } catch (err) {
-        console.error(`  ❌ Error for alert ${alert.id}:`, err.message);
-      }
+      const hit = alert.direction === "above" ? closePrice >= alert.targetPrice : closePrice <= alert.targetPrice;
+      console.log(`    ${pair}[${tf}]: close=${closePrice} target=${alert.targetPrice} dir=${alert.direction} hit=${hit}`);
+      if (hit) await triggerAlert(alert, closePrice);
     }
-  });
+  }
 
-  await Promise.all(promises);
   console.log(`========== CHECK DONE ==========\n`);
 }
+
+async function getLastCandleClose(pairSymbol, timeframe) {
+  const forexMap = {
+    EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY",
+    GBPJPY:"GBP/JPY", AUDUSD:"AUD/USD", USDGBP:"USD/GBP"
+  };
+  if (forexMap[pairSymbol]) return getTwelveDataLastClose(forexMap[pairSymbol], timeframe);
+
+  const yahooMap = {
+    BTC:"BTC-USD", ETH:"ETH-USD", BNB:"BNB-USD", SOL:"SOL-USD",
+    XRP:"XRP-USD", ADA:"ADA-USD", DOGE:"DOGE-USD", LTC:"LTC-USD",
+    XAU:"XAUUSD%3DX", XAG:"XAGUSD%3DX",
+    SPX500:"%5EGSPC", US30:"%5EDJI", US100:"%5EIXIC",
+    DXY:"DX-Y.NYB", NIF50:"%5ENSEI",
+  };
+  const ySymbol = yahooMap[pairSymbol];
+  if (!ySymbol) return 0;
+
+  const interval = getYahooInterval(timeframe);
+  try {
+    const r = await axios.get(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=${interval}&range=2d`,
+      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0)" } }
+    );
+    const result = r.data?.chart?.result?.[0];
+    const closes = result?.indicators?.quote?.[0]?.close;
+    const times  = result?.timestamp;
+    if (!closes || !times) return 0;
+    const nowSec = Date.now() / 1000;
+    const candleSec = getCandleMs(timeframe) / 1000;
+    for (let i = times.length - 1; i >= 0; i--) {
+      const closeTime = times[i] + candleSec;
+      if (closeTime <= nowSec && closes[i] != null) {
+        console.log(`    Yahoo candle [${timeframe}]: ${closes[i]}`);
+        return closes[i];
+      }
+    }
+    return 0;
+  } catch (e) { console.log(`    Yahoo candle failed: ${e.message}`); return 0; }
+}
+
+async function getTwelveDataLastClose(symbol, timeframe) {
+  const intervalMap = { M1:"1min", M5:"5min", M15:"15min", H1:"1h" };
+  const interval = intervalMap[timeframe] || "5min";
+  try {
+    const r = await axios.get(
+      `https://api.twelvedata.com/time_series?apikey=99b51c33d39e42b0bde39e5162a70976&symbol=${symbol}&interval=${interval}&outputsize=3`,
+      { timeout: 8000 }
+    );
+    const values = r.data?.values;
+    if (!values || values.length < 2) return 0;
+    const close = parseFloat(values[1]?.close) || 0;
+    console.log(`    TwelveData candle [${timeframe}]: ${close}`);
+    return close;
+  } catch (e) { console.log(`    TwelveData candle failed: ${e.message}`); return 0; }
+}
+
+async function triggerAlert(alert, price) {
+  console.log(`  🎯 HIT: ${alert.pairSymbol} price=${price} target=${alert.targetPrice}`);
+  try {
+    await db.collection("alerts").doc(alert.id).update({ triggered:true, hitAt:Date.now(), hitPrice:price });
+    console.log(`  ✅ Marked triggered`);
+    let fcmToken = null;
+    const userDoc = await db.collection("users").doc(alert.userId).get();
+    if (userDoc.exists) { fcmToken = userDoc.data().fcmToken; }
+    else {
+      const all = await db.collection("users").limit(1).get();
+      if (!all.empty) fcmToken = all.docs[0].data().fcmToken;
+    }
+    if (!fcmToken) { console.log(`  ❌ No FCM token`); return; }
+    await sendAlarmPush(fcmToken, alert, price);
+  } catch (err) { console.error(`  ❌ triggerAlert error:`, err.message); }
+}
+
+function getCandleMs(tf) {
+  switch(tf) { case"M1":return 60000; case"M5":return 300000; case"M15":return 900000; case"H1":return 3600000; default:return 300000; }
+}
+function getYahooInterval(tf) {
+  switch(tf) { case"M1":return"1m"; case"M5":return"5m"; case"M15":return"15m"; case"H1":return"60m"; default:return"5m"; }
+}
+
 
 // ── Routes ────────────────────────────────────────────────────────────────
 
