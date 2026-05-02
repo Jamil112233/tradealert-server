@@ -284,43 +284,31 @@ async function checkAlerts() {
 }
 
 async function getLastCandleClose(pairSymbol, timeframe) {
-  const forexMap = {
+  // TwelveData for everything — has Binance-exact prices for crypto/metals,
+  // exact prices for forex, and index prices too. No geo-blocking.
+  const tdSymbolMap = {
+    // Crypto — TwelveData uses Binance as source, prices match exactly
+    BTC:"BTC/USD", ETH:"ETH/USD", BNB:"BNB/USD", SOL:"SOL/USD",
+    XRP:"XRP/USD", ADA:"ADA/USD", DOGE:"DOGE/USD", LTC:"LTC/USD",
+    BCH:"BCH/USD", AVAX:"AVAX/USD", DOT:"DOT/USD", LINK:"LINK/USD",
+    UNI:"UNI/USD", ATOM:"ATOM/USD", NEAR:"NEAR/USD", ARB:"ARB/USD",
+    OP:"OP/USD", SHIB:"SHIB/USD", TRX:"TRX/USD", MATIC:"MATIC/USD",
+    // Metals — TwelveData XAU/XAG matches Binance spot prices
+    XAU:"XAU/USD", XAG:"XAG/USD",
+    // Forex
     EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY",
-    GBPJPY:"GBP/JPY", AUDUSD:"AUD/USD", USDGBP:"USD/GBP"
+    GBPJPY:"GBP/JPY", AUDUSD:"AUD/USD", USDGBP:"USD/GBP",
+    // Indices
+    SPX500:"SPX", US30:"DJI", US100:"NDX",
+    DXY:"DXY", NIF50:"NIFTY",
   };
-  if (forexMap[pairSymbol]) return getTwelveDataLastClose(forexMap[pairSymbol], timeframe);
 
-  const yahooMap = {
-    BTC:"BTC-USD", ETH:"ETH-USD", BNB:"BNB-USD", SOL:"SOL-USD",
-    XRP:"XRP-USD", ADA:"ADA-USD", DOGE:"DOGE-USD", LTC:"LTC-USD",
-    XAU:"XAUUSD%3DX", XAG:"XAGUSD%3DX",
-    SPX500:"%5EGSPC", US30:"%5EDJI", US100:"%5EIXIC",
-    DXY:"DX-Y.NYB", NIF50:"%5ENSEI",
-  };
-  const ySymbol = yahooMap[pairSymbol];
-  if (!ySymbol) return 0;
-
-  const interval = getYahooInterval(timeframe);
-  try {
-    const r = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=${interval}&range=2d`,
-      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0)" } }
-    );
-    const result = r.data?.chart?.result?.[0];
-    const closes = result?.indicators?.quote?.[0]?.close;
-    const times  = result?.timestamp;
-    if (!closes || !times) return 0;
-    const nowSec = Date.now() / 1000;
-    const candleSec = getCandleMs(timeframe) / 1000;
-    for (let i = times.length - 1; i >= 0; i--) {
-      const closeTime = times[i] + candleSec;
-      if (closeTime <= nowSec && closes[i] != null) {
-        console.log(`    Yahoo candle [${timeframe}]: ${closes[i]}`);
-        return closes[i];
-      }
-    }
+  const tdSymbol = tdSymbolMap[pairSymbol];
+  if (!tdSymbol) {
+    console.log(`    No TwelveData symbol for ${pairSymbol}`);
     return 0;
-  } catch (e) { console.log(`    Yahoo candle failed: ${e.message}`); return 0; }
+  }
+  return getTwelveDataLastClose(tdSymbol, timeframe);
 }
 
 async function getTwelveDataLastClose(symbol, timeframe) {
