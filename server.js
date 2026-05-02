@@ -89,11 +89,31 @@ const FOREX_SYMBOLS = {
 };
 
 async function fetchPrice(pairSymbol) {
-  if (METAL_SYMBOLS[pairSymbol])  return getFuturesPrice(METAL_SYMBOLS[pairSymbol]);
-  if (CRYPTO_SYMBOLS[pairSymbol]) return getBinancePrice(CRYPTO_SYMBOLS[pairSymbol]);
-  if (INDEX_SYMBOLS[pairSymbol])  return getYahooPrice(INDEX_SYMBOLS[pairSymbol]);
-  if (FOREX_SYMBOLS[pairSymbol])  return getTwelveDataPrice(FOREX_SYMBOLS[pairSymbol]);
-  return 0;
+  let price = 0;
+  let source = "";
+  try {
+    if (METAL_SYMBOLS[pairSymbol]) {
+      price = await getFuturesPrice(METAL_SYMBOLS[pairSymbol]);
+      source = "Binance Futures";
+    } else if (CRYPTO_SYMBOLS[pairSymbol]) {
+      price = await getBinancePrice(CRYPTO_SYMBOLS[pairSymbol]);
+      source = "Binance Spot";
+    } else if (INDEX_SYMBOLS[pairSymbol]) {
+      price = await getYahooPrice(INDEX_SYMBOLS[pairSymbol]);
+      source = "Yahoo Finance";
+    } else if (FOREX_SYMBOLS[pairSymbol]) {
+      price = await getTwelveDataPrice(FOREX_SYMBOLS[pairSymbol]);
+      source = "TwelveData";
+    } else {
+      console.log(`  ⚠️ Unknown pair: ${pairSymbol}`);
+      return 0;
+    }
+    console.log(`  [${source}] ${pairSymbol} = ${price}`);
+    return price;
+  } catch (err) {
+    console.error(`  fetchPrice error for ${pairSymbol}:`, err.message);
+    return 0;
+  }
 }
 
 // ── FCM sender ────────────────────────────────────────────────────────────
@@ -133,71 +153,89 @@ async function sendAlarmPush(fcmToken, alert, currentPrice) {
 // ── Main check logic ──────────────────────────────────────────────────────
 
 async function checkAlerts() {
-  console.log(`[${new Date().toISOString()}] Checking alerts...`);
+  const now = new Date().toISOString();
+  console.log(`\n========== CHECK at ${now} ==========`);
 
-  // Load all active alerts from Firestore
-  const snapshot = await db.collection("alerts")
-    .where("triggered", "==", false)
-    .get();
-
-  if (snapshot.empty) {
-    console.log("No active alerts.");
+  let snapshot;
+  try {
+    snapshot = await db.collection("alerts")
+      .where("triggered", "==", false)
+      .get();
+  } catch (err) {
+    console.error("Firestore read failed:", err.message);
     return;
   }
 
-  // Group by pairSymbol to avoid fetching same price multiple times
+  if (snapshot.empty) {
+    console.log("No active alerts in Firestore.");
+    return;
+  }
+
+  console.log(`Found ${snapshot.size} active alert(s)`);
+
+  // Group by pairSymbol
   const alertsByPair = {};
   snapshot.forEach(doc => {
     const alert = { id: doc.id, ...doc.data() };
+    console.log(`  Alert: ${alert.pairSymbol} target=${alert.targetPrice} dir=${alert.direction}`);
     if (!alertsByPair[alert.pairSymbol]) alertsByPair[alert.pairSymbol] = [];
     alertsByPair[alert.pairSymbol].push(alert);
   });
 
-  // Fetch prices and check each alert
   const promises = Object.entries(alertsByPair).map(async ([pair, alerts]) => {
     const price = await fetchPrice(pair);
-    if (!price || price <= 0) return;
+    console.log(`  Price check: ${pair} = ${price}`);
+    if (!price || price <= 0) {
+      console.log(`  ⚠️ Could not fetch price for ${pair}`);
+      return;
+    }
 
     for (const alert of alerts) {
       const hit = alert.direction === "above"
         ? price >= alert.targetPrice
         : price <= alert.targetPrice;
 
+      console.log(`  ${pair}: price=${price} target=${alert.targetPrice} dir=${alert.direction} hit=${hit}`);
+
       if (!hit) continue;
 
-      console.log(`🎯 HIT: ${pair} price=${price} target=${alert.targetPrice}`);
+      console.log(`  🎯 HIT DETECTED: ${pair} price=${price} target=${alert.targetPrice}`);
 
       try {
-        // Mark as triggered in Firestore
         await db.collection("alerts").doc(alert.id).update({
           triggered: true,
           hitAt: Date.now(),
           hitPrice: price,
         });
+        console.log(`  ✅ Marked triggered in Firestore`);
 
-        // Get user FCM token
         const userDoc = await db.collection("users").doc(alert.userId).get();
-        if (!userDoc.exists) continue;
+        if (!userDoc.exists) {
+          console.log(`  ❌ User not found: ${alert.userId}`);
+          continue;
+        }
         const fcmToken = userDoc.data().fcmToken;
-        if (!fcmToken) continue;
-
-        // Send push notification
+        if (!fcmToken) {
+          console.log(`  ❌ No FCM token for user: ${alert.userId}`);
+          continue;
+        }
+        console.log(`  📤 Sending FCM push...`);
         await sendAlarmPush(fcmToken, alert, price);
-
       } catch (err) {
-        console.error(`Error processing alert ${alert.id}:`, err.message);
+        console.error(`  ❌ Error for alert ${alert.id}:`, err.message);
       }
     }
   });
 
   await Promise.all(promises);
-  console.log("Check complete.");
+  console.log(`========== CHECK DONE ==========\n`);
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
 
 // cron-job.org hits this every minute
 app.get("/check", async (req, res) => {
+  console.log(`\n🔔 /check called at ${new Date().toISOString()} from ${req.ip}`);
   try {
     await checkAlerts();
     res.json({ ok: true, time: new Date().toISOString() });
