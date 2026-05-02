@@ -26,77 +26,67 @@ console.log("Firebase initialized for project: tradealert-2602c");
 // - CoinGecko for crypto (free, no key, uses Binance data)
 // - Metals-API alternative for XAU/XAG
 
-async function getBinancePrice(symbol) {
-  // Coinbase API — no geo-block, no rate limit on free tier, works from Render
-  const coinbaseMap = {
-    BTCUSDT:"BTC-USD", ETHUSDT:"ETH-USD", BNBUSDT:"BNB-USD",
-    SOLUSDT:"SOL-USD", XRPUSDT:"XRP-USD", ADAUSDT:"ADA-USD",
-    DOGEUSDT:"DOGE-USD", AVAXUSDT:"AVAX-USD", DOTUSDT:"DOT-USD",
-    MATICUSDT:"MATIC-USD", LINKUSDT:"LINK-USD", UNIUSDT:"UNI-USD",
-    ATOMUSDT:"ATOM-USD", LTCUSDT:"LTC-USD", BCHUSDT:"BCH-USD",
-    NEARUSDT:"NEAR-USD", ARBUSDT:"ARB-USD", OPUSDT:"OP-USD",
-    SHIBUSDT:"SHIB-USD", TRXUSDT:"TRX-USD"
-  };
-  const cbSymbol = coinbaseMap[symbol];
-  if (!cbSymbol) return 0;
-  try {
-    const r = await axios.get(
-      `https://api.coinbase.com/v2/prices/${cbSymbol}/spot`,
-      { timeout: 6000, headers: { "User-Agent": "Mozilla/5.0" } }
-    );
-    const p = parseFloat(r.data?.data?.amount) || 0;
-    if (p > 0) { console.log(`  [Coinbase] ${symbol} = ${p}`); return p; }
-  } catch (e) { console.log(`  Coinbase failed for ${symbol}: ${e.message}`); }
+// Binance proxy endpoints — these bypass the US geo-block (error 451)
+// Binance operates regional proxies outside the US for this exact reason
+const BINANCE_PROXIES = [
+  "https://api.binance.me/api/v3/ticker/price",      // Binance.me — EU proxy
+  "https://api-gcp.binance.com/api/v3/ticker/price", // Google Cloud proxy
+  "https://api.binance.vision/api/v3/ticker/price",  // Binance CDN proxy
+];
+const BINANCE_FUTURES_PROXIES = [
+  "https://fapi.binance.me/fapi/v1/ticker/price",
+  "https://fapi.binance.vision/fapi/v1/ticker/price",
+];
 
-  // Fallback: CoinCap API (also free, no key, no rate limit issues)
-  const coinCapMap = {
-    BTCUSDT:"bitcoin", ETHUSDT:"ethereum", BNBUSDT:"binance-coin",
-    SOLUSDT:"solana", XRPUSDT:"xrp", ADAUSDT:"cardano",
-    DOGEUSDT:"dogecoin", LTCUSDT:"litecoin", BCHUSDT:"bitcoin-cash",
-    AVAXUSDT:"avalanche", DOTUSDT:"polkadot", LINKUSDT:"chainlink",
-    TRXUSDT:"tron", NEARUSDT:"near-protocol", SHIBUSDT:"shiba-inu"
-  };
-  const capId = coinCapMap[symbol];
-  if (!capId) return 0;
-  try {
-    const r = await axios.get(
-      `https://api.coincap.io/v2/assets/${capId}`,
-      { timeout: 6000 }
-    );
-    const p = parseFloat(r.data?.data?.priceUsd) || 0;
-    if (p > 0) { console.log(`  [CoinCap] ${symbol} = ${p}`); return p; }
-  } catch (e) { console.log(`  CoinCap failed: ${e.message}`); }
+async function getBinancePrice(symbol) {
+  for (const endpoint of BINANCE_PROXIES) {
+    try {
+      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
+        timeout: 5000,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+      });
+      const p = parseFloat(r.data?.price) || 0;
+      if (p > 0) { console.log(`  [Binance ${endpoint.split("/")[2]}] ${symbol} = ${p}`); return p; }
+    } catch (e) { console.log(`  Binance ${endpoint.split("/")[2]} failed: ${e.message}`); }
+  }
   return 0;
 }
 
 async function getFuturesPrice(symbol) {
-  // Gold/Silver: use Open Exchange Rates / Frankfurter won't have metals
-  // Best free source for live XAU/XAG: use Coinbase which has XAU-USD pair
-  const cbMap = { XAUUSDT: "XAU-USD", XAGUSDT: "XAG-USD" };
-  const cbSym = cbMap[symbol];
-  if (cbSym) {
+  for (const endpoint of BINANCE_FUTURES_PROXIES) {
     try {
-      const r = await axios.get(
-        `https://api.coinbase.com/v2/prices/${cbSym}/spot`,
-        { timeout: 6000, headers: { "User-Agent": "Mozilla/5.0" } }
-      );
-      const p = parseFloat(r.data?.data?.amount) || 0;
-      if (p > 0) { console.log(`  [Coinbase] ${symbol} = ${p}`); return p; }
-    } catch (e) { console.log(`  Coinbase metals failed: ${e.message}`); }
+      const r = await axios.get(`${endpoint}?symbol=${symbol}`, {
+        timeout: 5000,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+      });
+      const p = parseFloat(r.data?.price) || 0;
+      if (p > 0) { console.log(`  [Binance Futures ${endpoint.split("/")[2]}] ${symbol} = ${p}`); return p; }
+    } catch (e) { console.log(`  Binance futures ${endpoint.split("/")[2]} failed: ${e.message}`); }
   }
-  // Fallback: Yahoo Finance spot
-  const yahooMap = { XAUUSDT: "XAUUSD%3DX", XAGUSDT: "XAGUSD%3DX" };
-  const ySym = yahooMap[symbol];
-  if (!ySym) return 0;
-  try {
-    const r = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=1m&range=1d`,
-      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } }
-    );
-    const p = parseFloat(r.data?.chart?.result?.[0]?.meta?.regularMarketPrice) || 0;
-    if (p > 0) { console.log(`  [Yahoo spot ${symbol}] = ${p}`); return p; }
-  } catch (e) { console.log(`  Yahoo metals failed: ${e.message}`); }
-  return 0;
+  // Fallback to spot if futures all fail
+  return getBinancePrice(symbol);
+}
+
+async function getBinanceKlines(symbol, interval, isFutures = false) {
+  // Fetch candle history — try proxy endpoints
+  const endpoints = isFutures
+    ? ["https://fapi.binance.me/fapi/v1/klines", "https://fapi.binance.vision/fapi/v1/klines"]
+    : ["https://api.binance.me/api/v3/klines", "https://api-gcp.binance.com/api/v3/klines", "https://api.binance.vision/api/v3/klines"];
+
+  for (const endpoint of endpoints) {
+    try {
+      const r = await axios.get(endpoint, {
+        params: { symbol, interval, limit: 3 },
+        timeout: 6000,
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+      });
+      if (r.data && r.data.length >= 2) {
+        console.log(`  [Binance klines ${endpoint.split("/")[2]}] ${symbol} ${interval} OK`);
+        return r.data;
+      }
+    } catch (e) { console.log(`  Binance klines ${endpoint.split("/")[2]} failed: ${e.message}`); }
+  }
+  return null;
 }
 
 async function getYahooPrice(yahooSymbol) {
@@ -284,31 +274,82 @@ async function checkAlerts() {
 }
 
 async function getLastCandleClose(pairSymbol, timeframe) {
-  // TwelveData for everything — has Binance-exact prices for crypto/metals,
-  // exact prices for forex, and index prices too. No geo-blocking.
-  const tdSymbolMap = {
-    // Crypto — TwelveData uses Binance as source, prices match exactly
-    BTC:"BTC/USD", ETH:"ETH/USD", BNB:"BNB/USD", SOL:"SOL/USD",
-    XRP:"XRP/USD", ADA:"ADA/USD", DOGE:"DOGE/USD", LTC:"LTC/USD",
-    BCH:"BCH/USD", AVAX:"AVAX/USD", DOT:"DOT/USD", LINK:"LINK/USD",
-    UNI:"UNI/USD", ATOM:"ATOM/USD", NEAR:"NEAR/USD", ARB:"ARB/USD",
-    OP:"OP/USD", SHIB:"SHIB/USD", TRX:"TRX/USD", MATIC:"MATIC/USD",
-    // Metals — TwelveData XAU/XAG matches Binance spot prices
-    XAU:"XAU/USD", XAG:"XAG/USD",
-    // Forex
-    EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY",
-    GBPJPY:"GBP/JPY", AUDUSD:"AUD/USD", USDGBP:"USD/GBP",
-    // Indices
-    SPX500:"SPX", US30:"DJI", US100:"NDX",
-    DXY:"DXY", NIF50:"NIFTY",
-  };
+  const intervalMap = { M1:"1m", M5:"5m", M15:"15m", H1:"1h" };
+  const interval = intervalMap[timeframe] || "5m";
 
-  const tdSymbol = tdSymbolMap[pairSymbol];
-  if (!tdSymbol) {
-    console.log(`    No TwelveData symbol for ${pairSymbol}`);
-    return 0;
+  // Forex → TwelveData
+  const forexMap = {
+    EURUSD:"EUR/USD", GBPUSD:"GBP/USD", USDJPY:"USD/JPY",
+    GBPJPY:"GBP/JPY", AUDUSD:"AUD/USD", USDGBP:"USD/GBP"
+  };
+  if (forexMap[pairSymbol]) return getTwelveDataLastClose(forexMap[pairSymbol], timeframe);
+
+  // Indices → Yahoo Finance (only option for indices, acceptable difference)
+  const indexYahoo = {
+    SPX500:"%5EGSPC", US30:"%5EDJI", US100:"%5EIXIC",
+    DXY:"DX-Y.NYB", NIF50:"%5ENSEI"
+  };
+  if (indexYahoo[pairSymbol]) {
+    return getYahooLastClose(indexYahoo[pairSymbol], timeframe);
   }
-  return getTwelveDataLastClose(tdSymbol, timeframe);
+
+  // Crypto → Binance spot klines (exact Binance price)
+  const cryptoSymbol = CRYPTO_SYMBOLS[pairSymbol];
+  if (cryptoSymbol) {
+    const klines = await getBinanceKlines(cryptoSymbol, interval, false);
+    if (klines) {
+      // klines[-1] may still be open, klines[-2] = last completed
+      const lastClosed = klines[klines.length - 2];
+      const close = parseFloat(lastClosed[4]); // index 4 = close price
+      console.log(`    [Binance kline] ${cryptoSymbol} [${timeframe}] close=${close}`);
+      return close;
+    }
+  }
+
+  // Metals → Binance futures klines (XAUUSDT, XAGUSDT)
+  const metalSymbol = METAL_SYMBOLS[pairSymbol];
+  if (metalSymbol) {
+    const klines = await getBinanceKlines(metalSymbol, interval, true);
+    if (klines) {
+      const lastClosed = klines[klines.length - 2];
+      const close = parseFloat(lastClosed[4]);
+      console.log(`    [Binance futures kline] ${metalSymbol} [${timeframe}] close=${close}`);
+      return close;
+    }
+    // Fallback to spot if futures blocked
+    const spotKlines = await getBinanceKlines(metalSymbol, interval, false);
+    if (spotKlines) {
+      const close = parseFloat(spotKlines[spotKlines.length - 2][4]);
+      console.log(`    [Binance spot kline] ${metalSymbol} [${timeframe}] close=${close}`);
+      return close;
+    }
+  }
+
+  console.log(`    No candle source found for ${pairSymbol}`);
+  return 0;
+}
+
+async function getYahooLastClose(ySymbol, timeframe) {
+  const yInterval = { M1:"1m", M5:"5m", M15:"15m", H1:"60m" }[timeframe] || "5m";
+  try {
+    const r = await axios.get(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=${yInterval}&range=2d`,
+      { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0)" } }
+    );
+    const result = r.data?.chart?.result?.[0];
+    const closes = result?.indicators?.quote?.[0]?.close;
+    const times  = result?.timestamp;
+    if (!closes || !times) return 0;
+    const nowSec    = Date.now() / 1000;
+    const candleSec = getCandleMs(timeframe) / 1000;
+    for (let i = times.length - 1; i >= 0; i--) {
+      if (times[i] + candleSec <= nowSec && closes[i] != null) {
+        console.log(`    [Yahoo kline] ${ySymbol} [${timeframe}] close=${closes[i]}`);
+        return closes[i];
+      }
+    }
+  } catch (e) { console.log(`    Yahoo kline failed: ${e.message}`); }
+  return 0;
 }
 
 async function getTwelveDataLastClose(symbol, timeframe) {
