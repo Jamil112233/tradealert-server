@@ -27,60 +27,76 @@ console.log("Firebase initialized for project: tradealert-2602c");
 // - Metals-API alternative for XAU/XAG
 
 async function getBinancePrice(symbol) {
-  // CoinGecko — free, no API key, returns same prices as Binance, works on all servers
-  const coinMap = {
-    BTCUSDT:"bitcoin", ETHUSDT:"ethereum", BNBUSDT:"binancecoin",
-    SOLUSDT:"solana", XRPUSDT:"ripple", ADAUSDT:"cardano",
-    DOGEUSDT:"dogecoin", AVAXUSDT:"avalanche-2", DOTUSDT:"polkadot",
-    MATICUSDT:"matic-network", LINKUSDT:"chainlink", UNIUSDT:"uniswap",
-    ATOMUSDT:"cosmos", LTCUSDT:"litecoin", BCHUSDT:"bitcoin-cash",
-    NEARUSDT:"near", ARBUSDT:"arbitrum", OPUSDT:"optimism",
-    SHIBUSDT:"shiba-inu", TRXUSDT:"tron"
+  // Coinbase API — no geo-block, no rate limit on free tier, works from Render
+  const coinbaseMap = {
+    BTCUSDT:"BTC-USD", ETHUSDT:"ETH-USD", BNBUSDT:"BNB-USD",
+    SOLUSDT:"SOL-USD", XRPUSDT:"XRP-USD", ADAUSDT:"ADA-USD",
+    DOGEUSDT:"DOGE-USD", AVAXUSDT:"AVAX-USD", DOTUSDT:"DOT-USD",
+    MATICUSDT:"MATIC-USD", LINKUSDT:"LINK-USD", UNIUSDT:"UNI-USD",
+    ATOMUSDT:"ATOM-USD", LTCUSDT:"LTC-USD", BCHUSDT:"BCH-USD",
+    NEARUSDT:"NEAR-USD", ARBUSDT:"ARB-USD", OPUSDT:"OP-USD",
+    SHIBUSDT:"SHIB-USD", TRXUSDT:"TRX-USD"
   };
-  const coinId = coinMap[symbol];
-  if (!coinId) return 0;
+  const cbSymbol = coinbaseMap[symbol];
+  if (!cbSymbol) return 0;
   try {
     const r = await axios.get(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
-      { timeout: 8000, headers: { "Accept": "application/json" } }
+      `https://api.coinbase.com/v2/prices/${cbSymbol}/spot`,
+      { timeout: 6000, headers: { "User-Agent": "Mozilla/5.0" } }
     );
-    const p = parseFloat(r.data[coinId]?.usd) || 0;
-    console.log(`  [CoinGecko] ${symbol} = ${p}`);
-    return p;
-  } catch (e) {
-    console.log(`  CoinGecko failed for ${symbol}: ${e.message}`);
-    return 0;
-  }
+    const p = parseFloat(r.data?.data?.amount) || 0;
+    if (p > 0) { console.log(`  [Coinbase] ${symbol} = ${p}`); return p; }
+  } catch (e) { console.log(`  Coinbase failed for ${symbol}: ${e.message}`); }
+
+  // Fallback: CoinCap API (also free, no key, no rate limit issues)
+  const coinCapMap = {
+    BTCUSDT:"bitcoin", ETHUSDT:"ethereum", BNBUSDT:"binance-coin",
+    SOLUSDT:"solana", XRPUSDT:"xrp", ADAUSDT:"cardano",
+    DOGEUSDT:"dogecoin", LTCUSDT:"litecoin", BCHUSDT:"bitcoin-cash",
+    AVAXUSDT:"avalanche", DOTUSDT:"polkadot", LINKUSDT:"chainlink",
+    TRXUSDT:"tron", NEARUSDT:"near-protocol", SHIBUSDT:"shiba-inu"
+  };
+  const capId = coinCapMap[symbol];
+  if (!capId) return 0;
+  try {
+    const r = await axios.get(
+      `https://api.coincap.io/v2/assets/${capId}`,
+      { timeout: 6000 }
+    );
+    const p = parseFloat(r.data?.data?.priceUsd) || 0;
+    if (p > 0) { console.log(`  [CoinCap] ${symbol} = ${p}`); return p; }
+  } catch (e) { console.log(`  CoinCap failed: ${e.message}`); }
+  return 0;
 }
 
 async function getFuturesPrice(symbol) {
-  // For XAU/XAG — use Yahoo Finance which works fine from Render
-  const yahooMap = { XAUUSDT: "GC%3DF", XAGUSDT: "SI%3DF" };
-  const ySymbol = yahooMap[symbol];
-  if (!ySymbol) return 0;
+  // Gold/Silver: use Open Exchange Rates / Frankfurter won't have metals
+  // Best free source for live XAU/XAG: use Coinbase which has XAU-USD pair
+  const cbMap = { XAUUSDT: "XAU-USD", XAGUSDT: "XAG-USD" };
+  const cbSym = cbMap[symbol];
+  if (cbSym) {
+    try {
+      const r = await axios.get(
+        `https://api.coinbase.com/v2/prices/${cbSym}/spot`,
+        { timeout: 6000, headers: { "User-Agent": "Mozilla/5.0" } }
+      );
+      const p = parseFloat(r.data?.data?.amount) || 0;
+      if (p > 0) { console.log(`  [Coinbase] ${symbol} = ${p}`); return p; }
+    } catch (e) { console.log(`  Coinbase metals failed: ${e.message}`); }
+  }
+  // Fallback: Yahoo Finance spot
+  const yahooMap = { XAUUSDT: "XAUUSD%3DX", XAGUSDT: "XAGUSD%3DX" };
+  const ySym = yahooMap[symbol];
+  if (!ySym) return 0;
   try {
     const r = await axios.get(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${ySymbol}?interval=1m&range=1d`,
+      `https://query1.finance.yahoo.com/v8/finance/chart/${ySym}?interval=1m&range=1d`,
       { timeout: 8000, headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" } }
     );
     const p = parseFloat(r.data?.chart?.result?.[0]?.meta?.regularMarketPrice) || 0;
-    console.log(`  [Yahoo ${symbol}] = ${p}`);
-    return p;
-  } catch (e) {
-    // Fallback: use Metals-API free endpoint
-    try {
-      const metalMap = { XAUUSDT: "XAU", XAGUSDT: "XAG" };
-      const metal = metalMap[symbol];
-      const r2 = await axios.get(
-        `https://www.goldapi.io/api/${metal}/USD`,
-        { timeout: 8000, headers: { "x-access-token": "goldapi-free" } }
-      );
-      const p2 = parseFloat(r2.data?.price) || 0;
-      if (p2 > 0) { console.log(`  [GoldAPI ${symbol}] = ${p2}`); return p2; }
-    } catch {}
-    console.log(`  Yahoo metals failed for ${symbol}: ${e.message}`);
-    return 0;
-  }
+    if (p > 0) { console.log(`  [Yahoo spot ${symbol}] = ${p}`); return p; }
+  } catch (e) { console.log(`  Yahoo metals failed: ${e.message}`); }
+  return 0;
 }
 
 async function getYahooPrice(yahooSymbol) {
